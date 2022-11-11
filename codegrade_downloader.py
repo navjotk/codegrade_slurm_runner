@@ -6,8 +6,12 @@ import click
 import subprocess
 import shlex
 import schedule
-from crontab import CronTab
+import portalocker
+import yaml
+import time
 from mako.template import Template
+from portalocker import LockException
+from pathlib import Path
 
 
 def dir_exists(path):
@@ -31,12 +35,14 @@ def unzip_file(filename, directory_to_extract_to):
 
 def run_command(command, cwd, shell=False):
     print("Executing command `%s`"%command)
+    if command is None:
+        return
     c = shlex.split(command)
     p = subprocess.Popen(c, cwd=cwd, shell=shell)
     return p.wait()
 
 
-def download_submissions(basepath):
+def download_submissions(username, password, tenant, assignment_id, basepath):
     with codegrade.login(username=username, password=password, tenant=tenant) as client:
         submissions = client.assignment.get_all_submissions(assignment_id=assignment_id, latest_only=True)
         list_of_ids = []
@@ -108,21 +114,27 @@ def call_slurm(slurm_file, context_dir):
     run_command("sbatch %s" % slurm_file, cwd=context_dir)
 
 
-def schedule_call_me(update_frequency):
-    cron = CronTab(user=True)
-    myname = sys.argv[0]
-    file_path = os.path.realpath(__file__)
-    command = "python %s > %s/output.log" % (myname, file_path)
-    timedelta = datetime.timedelta(hours=update_frequency)
-    job = cron.new(command=command)
-    job.setall(datetime.datetime.now() + timedelta)
-    cron.write()
+def load_config(config_file):
+    with open(config_file, 'r') as file:
+        config = yaml.safe_load(file)
+    
+    return config
     
 
 
-def run():
-    global basepath
-    global submission_template
+def run(config):
+    basepath = config['basepath']
+    username = config['username']
+    password = config['password']
+    tenant = config['tenant']
+    assignment_id = config['assignment_id']
+    artifacts_repo = config['artifacts_repo']
+    compile_commands = config['compile_commands']
+    setup_commands = config['setup_commands']
+    submission_template = config['submission_template']
+    leaderboard_repo = config['leaderboard_repo']
+    update_frequency = int(config['update_frequency'])
+    
 
     basepath = os.path.abspath(basepath)
     dir_exists(basepath)
@@ -131,7 +143,7 @@ def run():
     dir_exists(submissions_path)
     submissions_download_path = "%s/downloaded" % submissions_path
     dir_exists(submissions_download_path)
-    submissions = download_submissions(submissions_download_path)
+    submissions = download_submissions(username, password, tenant, assignment_id, submissions_download_path)
     
     submissions = filter_new_submissions(submissions)
     
@@ -151,14 +163,58 @@ def run():
         dir_exists(slurm_file_path)
         slurm_file = prepare_slurm_file(submissions, submission_template, slurm_file_path, artifacts_path, leaderboard_repo, update_frequency)
         call_slurm(slurm_file, slurm_file_path)
-    
-    if auto_update:
-        schedule_call_me(update_frequency)
 
+
+@click.command()
+@click.option('--config-file', default="config.yaml", help='The yaml config file')
+@click.option('--lock-file', default="codegrade.running", help='The name of the file used to track whether a process is running. ')
+@click.option('--unlock-file', default="codegrade.stop", help='The name of the file used to ask the running process to shut down. ')
+def looper(config_file, lock_file, unlock_file):
+    lock = portalocker.Lock(lock_file)
+    lock_acquired = False
+    try:
+        file_lock = lock.acquire(fail_when_locked=True)
+        lock_acquired = True
+        
+        config = load_config(config_file)
+        
+        def run_closure():
+            run(config)
+        
+        auto_update = bool(config['auto_update'])
+        update_frequency = int(config['update_frequency'])
+        assignment_deadline = config['assignment_deadline']
+
+        run_closure()
+
+        if auto_update:
+            schedule.every(update_frequency).hours.until(assignment_deadline).do(run_closure)
+
+        while auto_update:
+            if os.path.exists(unlock_file):
+                print("Stop file `%s` exists. I'm being asked to stop. Seeya later")
+                break
+            schedule.run_pending()
+            n = schedule.idle_seconds()
+            if n is None:
+                # no more jobs
+                break
+            elif n > 0:
+                # sleep exactly the right amount of time
+                time.sleep(n)
+
+    except LockException:
+        print("Process already running. Send a kill signal?")
+        Path(unlock_file).touch()
+    finally:
+        if lock_acquired:
+            os.remove(lock_file)
+            lock.release()
+    
     
 
 if __name__ == "__main__":
-    run()
+    looper()
 
 
 
