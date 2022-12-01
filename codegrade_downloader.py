@@ -1,4 +1,5 @@
 import codegrade
+import csv
 import requests
 import os
 import zipfile
@@ -33,13 +34,21 @@ def unzip_file(filename, directory_to_extract_to):
     with zipfile.ZipFile(filename, 'r') as zip_ref:
         zip_ref.extractall(directory_to_extract_to)
 
-def run_command(command, cwd, shell=False):
+def run_command(command, cwd, shell=False, output_file=None):
     print("Executing command `%s`"%command)
     if command is None:
         return
     c = shlex.split(command)
-    p = subprocess.Popen(c, cwd=cwd, shell=shell)
-    return p.wait()
+    p = subprocess.run(c, cwd=cwd, shell=shell, check=True, capture_output=True)
+
+    if output_file is not None:
+        with open(output_file, 'w') as file:
+            file.write(command)
+            file.write("\n")
+            file.write(p.stdout)
+            file.write("\n")
+            file.write(p.stderr)
+    return p.returncode
 
 
 def download_submissions(username, password, tenant, assignment_id, basepath):
@@ -49,25 +58,48 @@ def download_submissions(username, password, tenant, assignment_id, basepath):
         for submission in submissions:
             detailed_submission = client.submission.get(submission_id=submission.id, type="zip")
             file_to_download = detailed_submission.url
-            saved_file_name = "%s/%s.zip" % (basepath, submission.user.id)
-            list_of_ids.append(submission.user.id)
+            saved_file_name = os.path.join(basepath, "%s.zip" % submission.user.id)
+            list_of_ids.append({'user': submission.user.id, 'file': submission.id,
+                                'username': submission.user.username})
             download_file(file_to_download, saved_file_name)
     return list_of_ids
 
 
-def filter_new_submissions(submissions):
-    return submissions         
+def filter_new_submissions(submissions, submission_record_filename="records.csv"):
+    if not os.path.exists(submission_record_filename):
+        return submissions
 
-
-def extract_submissions(submissions, frompath, topath, append_path="top"):
-    paths = []
+    with open(submission_record_filename) as ifile:
+        reader = csv.DictReader(ifile)
+        existing_results = list(reader)
+    
+    excluded_submissions = []
     for submission in submissions:
-        directory_to_extract_to = "%s/%s" % (topath, submission)
-        saved_file_name = "%s/%s.zip" % (frompath, submission)
+        for existing_submission in existing_results:
+            
+            if str(existing_submission['user']) == str(submission['user']) and \
+                str(existing_submission['file']) == str(submission['file']):
+                excluded_submissions.append(submission)
+                break
+
+    filtered_submissions = [x for x in submissions if x not in excluded_submissions]
+
+    return filtered_submissions         
+
+
+def extract_submissions(submissions, frompath, topath):
+    outgoing_submissions = []
+    for submission_dict in submissions:
+        submission_user_id = submission_dict['user']
+        directory_to_extract_to = os.path.join(topath, str(submission_user_id))
+        saved_file_name = os.path.join(frompath, "%s.zip" % submission_user_id)
         unzip_file(saved_file_name, directory_to_extract_to)
-        directory_to_extract_to = "%s/%s" % (directory_to_extract_to, append_path)
-        paths.append(directory_to_extract_to)
-    return paths
+
+        while len(os.listdir(directory_to_extract_to)) == 1:
+            directory_to_extract_to = os.path.join(directory_to_extract_to, os.listdir(directory_to_extract_to)[0])
+        submission_dict['path'] = directory_to_extract_to
+        outgoing_submissions.append(submission_dict)
+    return outgoing_submissions
 
 
 def compile_submissions(submissions, compile_commands, artifacts_path, setup_commands):
@@ -75,18 +107,19 @@ def compile_submissions(submissions, compile_commands, artifacts_path, setup_com
         run_command(command, cwd=artifacts_path, shell=True)
     
     successful_submissions = []
-    for submission in submissions:
+    for submission_dict in submissions:
+        submission_dir = submission_dict['path']
         rc = 0
         for command in compile_commands:
             command = command.format_map({'artifacts_path': artifacts_path})
-            rc += run_command(command, cwd=submission)
+            rc += run_command(command, cwd=submission_dir)
         if rc == 0:
-            successful_submissions.append(submission)
+            successful_submissions.append(submission_dict)
     return successful_submissions
 
 
 def get_artifacts(artifacts_repo, artifacts_path):
-    artifacts_dir = "%s/%s" % (artifacts_path, artifacts_repo.split("/")[-1].split(".")[0])
+    artifacts_dir = os.path.join(artifacts_path, artifacts_repo.split("/")[-1].split(".")[0])
 
     if not os.path.exists(artifacts_dir):
         run_command("git clone %s" % artifacts_repo, cwd=artifacts_path)
@@ -95,23 +128,22 @@ def get_artifacts(artifacts_repo, artifacts_path):
     return artifacts_dir
 
 
-def prepare_slurm_file(submissions, submission_template, target_dir, artifacts_path, leaderboard_repo,
+def prepare_slurm_file(submission_dict, submission_template, target_dir, artifacts_path, leaderboard_repo,
                         update_frequency):
-    submission_template_full_path = "%s/%s" % (artifacts_path, submission_template)
+    submission_template_full_path = os.path.join(artifacts_path, submission_template)
     slurm_file_template = Template(filename=submission_template_full_path)
-    submission_ids = [x.split("/")[-2] for x in submissions]
-    submissions = zip(submission_ids, submissions)
-    submission_file_string = slurm_file_template.render(submissions=submissions, artifacts_path=artifacts_path,
+
+    submission_file_string = slurm_file_template.render(submission_dict=submission_dict, artifacts_path=artifacts_path,
                                                         leaderboard_repo=leaderboard_repo,
                                                         update_frequency=update_frequency)
-    target_slurm_filename = "%s/%s" % (target_dir, submission_template)
+    target_slurm_filename = os.path.join(target_dir, 'p%s.sh' % submission_dict['user'])
     with open(target_slurm_filename, "w") as text_file:
         text_file.write(submission_file_string)
     return target_slurm_filename
 
 
 def call_slurm(slurm_file, context_dir):
-    run_command("sbatch %s" % slurm_file, cwd=context_dir)
+    run_command("sbatch --nice %s" % slurm_file, cwd=context_dir)
 
 
 def load_config(config_file):
@@ -119,6 +151,30 @@ def load_config(config_file):
         config = yaml.safe_load(file)
     
     return config
+
+
+def record(submissions, submission_record_filename="records.csv"):
+    if len(submissions) == 0:
+        return
+
+    exists = os.path.exists(submission_record_filename)
+    lock = portalocker.Lock(submission_record_filename)
+
+    existing_results = []
+    with lock:
+        with open(submission_record_filename, mode="a") as ofile:
+                writer = csv.DictWriter(ofile, fieldnames=submissions[0].keys())
+                if not exists:
+                    writer.writeheader()
+                for row in submissions:
+                    writer.writerow(row)
+
+def call_submission_processor(submission, submission_processor, artifacts_path):
+
+    submission_processor = submission_processor.format_map({'submission_dir': submission['path'],
+                                                            'submission_id': submission['user'],
+                                                            'artifacts_path': artifacts_path})
+    run_command(submission_processor, cwd=submission['path'])
     
 
 
@@ -134,35 +190,34 @@ def run(config):
     submission_template = config['submission_template']
     leaderboard_repo = config['leaderboard_repo']
     update_frequency = int(config['update_frequency'])
-    
+    submission_processor = config['submission_processor']
 
     basepath = os.path.abspath(basepath)
     dir_exists(basepath)
 
-    submissions_path = "%s/submissions" % basepath
+    submissions_path = os.path.join(basepath, "submissions")
     dir_exists(submissions_path)
-    submissions_download_path = "%s/downloaded" % submissions_path
+    submissions_download_path = os.path.join(submissions_path, "downloaded")
     dir_exists(submissions_download_path)
     submissions = download_submissions(username, password, tenant, assignment_id, submissions_download_path)
     
     submissions = filter_new_submissions(submissions)
     
-    submissions_extract_path = "%s/extracted" % submissions_path
+    submissions_extract_path = os.path.join(submissions_path, "extracted")
     dir_exists(submissions_extract_path)
     submissions = extract_submissions(submissions, submissions_download_path,
                                       submissions_extract_path)
     
-    artifacts_path = "%s/artifacts" % basepath
+    artifacts_path = os.path.join(basepath, "artifacts")
     dir_exists(artifacts_path)
     artifacts_path = get_artifacts(artifacts_repo, artifacts_path)
+    record(submissions)
     
-    submissions = compile_submissions(submissions, compile_commands, artifacts_path, setup_commands)
-
-    if len(submissions) > 0:
-        slurm_file_path = "%s/slurm" % basepath
-        dir_exists(slurm_file_path)
-        slurm_file = prepare_slurm_file(submissions, submission_template, slurm_file_path, artifacts_path, leaderboard_repo, update_frequency)
-        call_slurm(slurm_file, slurm_file_path)
+    for s in submissions:
+        call_submission_processor(s, submission_processor, artifacts_path)
+    
+    
+    print("All done. (Probably) going to sleep...")
 
 
 @click.command()

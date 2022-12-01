@@ -1,0 +1,15 @@
+username: <codegrade_username>
+password: <codegrade_password>
+tenant: <codegrade tenant>
+assignment_id: <assignment id as shown on codegrade>
+basepath: <directory to download submissions etc to>
+artifacts_repo: <repository to download your artifacts from>
+setup_commands: 
+- <commands to be executed to setup your artifacts before any processing begins>
+
+
+submission_processor: <command (script) to call in the artifacts directory for each submission>
+
+auto_update: <Auto run the code again>
+update_frequency: <Hours between sucessive runs>
+assignment_deadline: <until this date/time>
