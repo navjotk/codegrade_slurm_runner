@@ -199,19 +199,26 @@ def run(config):
     dir_exists(submissions_path)
     submissions_download_path = os.path.join(submissions_path, "downloaded")
     dir_exists(submissions_download_path)
+    print("Downloading submissions...")
     submissions = download_submissions(username, password, tenant, assignment_id, submissions_download_path)
     
     submissions = filter_new_submissions(submissions)
     
     submissions_extract_path = os.path.join(submissions_path, "extracted")
     dir_exists(submissions_extract_path)
+    print("Extracting...")
     submissions = extract_submissions(submissions, submissions_download_path,
                                       submissions_extract_path)
     
     artifacts_path = os.path.join(basepath, "artifacts")
     dir_exists(artifacts_path)
     artifacts_path = get_artifacts(artifacts_repo, artifacts_path)
-    record(submissions)
+
+    for command in setup_commands:
+        command = command.format_map({'artifacts_path': artifacts_path})
+        run_command(command, cwd=artifacts_path)
+
+    record(submissions, submission_record_filename=os.path.join(basepath, "submission-records.csv"))
     
     for s in submissions:
         call_submission_processor(s, submission_processor, artifacts_path)
