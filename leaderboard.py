@@ -34,6 +34,7 @@ def unzip_file(filename, directory_to_extract_to):
     with zipfile.ZipFile(filename, 'r') as zip_ref:
         zip_ref.extractall(directory_to_extract_to)
 
+
 def run_command(command, cwd, shell=False, output_file=None):
     print("Executing command `%s`"%command)
     if command is None:
@@ -72,11 +73,10 @@ def filter_new_submissions(submissions, submission_record_filename="records.csv"
     with open(submission_record_filename) as ifile:
         reader = csv.DictReader(ifile)
         existing_results = list(reader)
-    
+
     excluded_submissions = []
     for submission in submissions:
         for existing_submission in existing_results:
-            
             if str(existing_submission['user']) == str(submission['user']) and \
                 str(existing_submission['file']) == str(submission['file']):
                 excluded_submissions.append(submission)
@@ -105,7 +105,7 @@ def extract_submissions(submissions, frompath, topath):
 def compile_submissions(submissions, compile_commands, artifacts_path, setup_commands):
     for command in setup_commands:
         run_command(command, cwd=artifacts_path, shell=True)
-    
+
     successful_submissions = []
     for submission_dict in submissions:
         submission_dir = submission_dict['path']
@@ -149,7 +149,7 @@ def call_slurm(slurm_file, context_dir):
 def load_config(config_file):
     with open(config_file, 'r') as file:
         config = yaml.safe_load(file)
-    
+
     return config
 
 
@@ -170,12 +170,10 @@ def record(submissions, submission_record_filename="records.csv"):
                     writer.writerow(row)
 
 def call_submission_processor(submission, submission_processor, artifacts_path):
-
     submission_processor = submission_processor.format_map({'submission_dir': submission['path'],
                                                             'submission_id': submission['user'],
                                                             'artifacts_path': artifacts_path})
     run_command(submission_processor, cwd=submission['path'])
-    
 
 
 def run(config):
@@ -185,9 +183,7 @@ def run(config):
     tenant = config['tenant']
     assignment_id = config['assignment_id']
     artifacts_repo = config['artifacts_repo']
-    compile_commands = config['compile_commands']
     setup_commands = config['setup_commands']
-    submission_template = config['submission_template']
     leaderboard_repo = config['leaderboard_repo']
     update_frequency = int(config['update_frequency'])
     submission_processor = config['submission_processor']
@@ -200,16 +196,18 @@ def run(config):
     submissions_download_path = os.path.join(submissions_path, "downloaded")
     dir_exists(submissions_download_path)
     print("Downloading submissions...")
-    submissions = download_submissions(username, password, tenant, assignment_id, submissions_download_path)
-    
+    submissions = download_submissions(username, password,
+                                       tenant, assignment_id,
+                                       submissions_download_path)
+
     submissions = filter_new_submissions(submissions)
-    
+
     submissions_extract_path = os.path.join(submissions_path, "extracted")
     dir_exists(submissions_extract_path)
     print("Extracting...")
     submissions = extract_submissions(submissions, submissions_download_path,
                                       submissions_extract_path)
-    
+
     artifacts_path = os.path.join(basepath, "artifacts")
     dir_exists(artifacts_path)
     artifacts_path = get_artifacts(artifacts_repo, artifacts_path)
@@ -218,31 +216,35 @@ def run(config):
         command = command.format_map({'artifacts_path': artifacts_path})
         run_command(command, cwd=artifacts_path)
 
-    record(submissions, submission_record_filename=os.path.join(basepath, "submission-records.csv"))
-    
+    record(submissions,
+           submission_record_filename=os.path.join(basepath,
+                                                   "submission-records.csv"))
+
     for s in submissions:
         call_submission_processor(s, submission_processor, artifacts_path)
-    
-    
+
     print("All done. (Probably) going to sleep...")
 
 
 @click.command()
-@click.option('--config-file', default="config.yaml", help='The yaml config file')
-@click.option('--lock-file', default="codegrade.running", help='The name of the file used to track whether a process is running. ')
-@click.option('--unlock-file', default="codegrade.stop", help='The name of the file used to ask the running process to shut down. ')
+@click.option('--config-file', default="config.yaml",
+              help='The yaml config file')
+@click.option('--lock-file', default="codegrade.running",
+              help='The filename used to track whether a process is running')
+@click.option('--unlock-file', default="codegrade.stop",
+              help='The filename used to ask the running process to shut down')
 def looper(config_file, lock_file, unlock_file):
     lock = portalocker.Lock(lock_file)
     lock_acquired = False
     try:
-        file_lock = lock.acquire(fail_when_locked=True)
+        file_lock = lock.acquire(fail_when_locked=True) # noqa
         lock_acquired = True
-        
+
         config = load_config(config_file)
-        
+
         def run_closure():
             run(config)
-        
+
         auto_update = bool(config['auto_update'])
         update_frequency = int(config['update_frequency'])
         assignment_deadline = config['assignment_deadline']
@@ -250,11 +252,13 @@ def looper(config_file, lock_file, unlock_file):
         run_closure()
 
         if auto_update:
-            schedule.every(update_frequency).hours.until(assignment_deadline).do(run_closure)
+            schedule.every(update_frequency).\
+                hours.until(assignment_deadline).do(run_closure)
 
         while auto_update:
             if os.path.exists(unlock_file):
-                print("Stop file `%s` exists. I'm being asked to stop. Seeya later")
+                print("Stop file `%s` exists." % unlock_file)
+                print("I'm being asked to stop. Seeya later")
                 break
             schedule.run_pending()
             n = schedule.idle_seconds()
@@ -272,11 +276,7 @@ def looper(config_file, lock_file, unlock_file):
         if lock_acquired:
             os.remove(lock_file)
             lock.release()
-    
-    
+
 
 if __name__ == "__main__":
     looper()
-
-
-
